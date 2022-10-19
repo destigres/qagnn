@@ -17,6 +17,7 @@ dependencies:
   - nltk
   - pip
   - pytorch_geometric==2.1.0
+  - protobuf==3.20.0
   - pip:
     - networkx==2.6
     - torch-sparse==0.6.9

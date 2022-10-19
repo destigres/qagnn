@@ -22,7 +22,7 @@ import numpy as np
 import socket, os, subprocess, datetime
 print(socket.gethostname())
 print ("pid:", os.getpid())
-print ("conda env:", os.environ['CONDA_DEFAULT_ENV'])
+# print ("conda env:", os.environ['CONDA_DEFAULT_ENV'])
 print ("screen: %s" % subprocess.check_output('echo $STY', shell=True).decode('utf'))
 print ("gpu: %s" % subprocess.check_output('echo $CUDA_VISIBLE_DEVICES', shell=True).decode('utf'))
 
