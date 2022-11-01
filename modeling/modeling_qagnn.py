@@ -44,9 +44,11 @@ class QAGNN_Message_Passing(nn.Module):
 
     def mp_helper(self, _X, edge_index, edge_type, _node_type, _node_feature_extra):
         for _ in range(self.k):
-            _X = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
+            # _X = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
+            _X, attention_weights = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra, return_attention_weights=True)
             _X = self.activation(_X)
             _X = F.dropout(_X, self.dropout_rate, training = self.training)
+        self.cached_attention_weights = attention_weights
         return _X
 
 
@@ -168,6 +170,12 @@ class QAGNN(nn.Module):
 
 
         gnn_output = self.gnn(gnn_input, adj, node_type_ids, node_scores)
+
+        # matt
+        from du import tk, concepts, decode_attention
+        da = decode_attention(concept_ids=concept_ids.cpu().detach(), edge_ids=self.gnn.cached_attention_weights[0].cpu().detach(), edge_attentions=self.gnn.cached_attention_weights[1].cpu().detach(), edge_types = adj[1].cpu().detach())
+
+
 
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
 

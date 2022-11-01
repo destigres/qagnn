@@ -1,5 +1,6 @@
 import random
 
+
 try:
     from transformers import (ConstantLRSchedule, WarmupLinearSchedule, WarmupConstantSchedule)
 except:
@@ -85,6 +86,7 @@ def main():
 
     parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
     args = parser.parse_args()
+    args.save_dir = args.save_dir + datetime.datetime.today().strftime('%Y%m%d%H%M%S')
     if args.simple:
         parser.set_defaults(k=1)
     args = parser.parse_args()
@@ -253,7 +255,7 @@ def train(args):
                     b = min(a + args.mini_batch_size, bs)
                     if args.fp16:
                         with torch.cuda.amp.autocast():
-                            logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                            logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer) # sometimes this line produces nan logits
                             loss = compute_loss(logits, labels[a:b])
                     else:
                         logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
@@ -413,7 +415,7 @@ def eval_detail(args):
             with torch.no_grad():
                 for qids, labels, *input_data in tqdm(eval_set):
                     count += 1
-                    logits, _, concept_ids, node_type_ids, edge_index, edge_type = model(*input_data, detail=True)
+                    logits, attn, concept_ids, node_type_ids, edge_index, edge_type = model(*input_data, detail=True)
                     predictions = logits.argmax(1) #[bsize, ]
                     preds_ranked = (-logits).argsort(1) #[bsize, n_choices]
                     for i, (qid, label, pred, _preds_ranked, cids, ntype, edges, etype) in enumerate(zip(qids, labels, predictions, preds_ranked, concept_ids, node_type_ids, edge_index, edge_type)):

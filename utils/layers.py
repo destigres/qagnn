@@ -343,8 +343,8 @@ class MultiheadAttPoolLayer(nn.Module):
 
     def forward(self, q, k, mask=None):
         """
-        q: tensor of shape (b, d_q_original)
-        k: tensor of shape (b, l, d_k_original)
+        q: tensor of shape (b, d_q_original) (10x1024)
+        k: tensor of shape (b, l, d_k_original) (10x200x200)
         mask: tensor of shape (b, l) (optional, default None)
         returns: tensor of shape (b, n*d_v)
         """
@@ -353,11 +353,11 @@ class MultiheadAttPoolLayer(nn.Module):
         bs, _ = q.size()
         bs, len_k, _ = k.size()
 
-        qs = self.w_qs(q).view(bs, n_head, d_k)  # (b, n, dk)
+        qs = self.w_qs(q).view(bs, n_head, d_k)  # (b, n, dk) # 10x2x100
         ks = self.w_ks(k).view(bs, len_k, n_head, d_k)  # (b, l, n, dk)
         vs = self.w_vs(k).view(bs, len_k, n_head, d_v)  # (b, l, n, dv)
 
-        qs = qs.permute(1, 0, 2).contiguous().view(n_head * bs, d_k)
+        qs = qs.permute(1, 0, 2).contiguous().view(n_head * bs, d_k) # n_head=2
         ks = ks.permute(2, 0, 1, 3).contiguous().view(n_head * bs, len_k, d_k)
         vs = vs.permute(2, 0, 1, 3).contiguous().view(n_head * bs, len_k, d_v)
 
