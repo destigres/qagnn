@@ -44,7 +44,7 @@ class QAGNN_Message_Passing(nn.Module):
 
     def mp_helper(self, _X, edge_index, edge_type, _node_type, _node_feature_extra):
         for _ in range(self.k):
-            _X = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
+            _X, attn = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
             _X = self.activation(_X)
             _X = F.dropout(_X, self.dropout_rate, training = self.training)
         return _X
@@ -204,7 +204,7 @@ class LM_QAGNN(nn.Module):
                                         init_range=init_range)
 
 
-    def forward(self, *inputs, layer_id=-1, cache_output=False, detail=False):
+    def forward(self, *inputs, layer_id=-1, cache_output=False, detail=True):
         """
         sent_vecs: (batch_size, num_choice, d_sent)    -> (batch_size * num_choice, d_sent)
         concept_ids: (batch_size, num_choice, n_node)  -> (batch_size * num_choice, n_node)
@@ -410,7 +410,7 @@ class GATConvE(MessagePassing):
 
     def forward(self, x, edge_index, edge_type, node_type, node_feature_extra, return_attention_weights=False):
         # x: [N, emb_dim]
-        # edge_index: [2, E]
+        # edge_index: [2 - head -> tail ^ tail -> head, E]
         # edge_type [E,] -> edge_attr: [E, 39] / self_edge_attr: [N, 39]
         # node_type [N,] -> headtail_attr [E, 8(=4+4)] / self_headtail_attr: [N, 8]
         # node_feature_extra [N, dim]
