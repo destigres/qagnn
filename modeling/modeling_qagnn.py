@@ -157,16 +157,20 @@ class QAGNN(nn.Module):
                 indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices.cpu().numpy()
             else:
                 indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10, largest=True).indices.numpy()
-            top_k_subgraphs.append(indices)
+            top_k_subgraphs.append(
+                indices
+            )
         return top_k_subgraphs
 
 
     def break_attn_values_into_subgraphs(self,attn,og_edge_type,og_edge_index):
         num_subgraphs = len(og_edge_index)
         attn_subgraphs = []
+        prev_num_edges = 0
         for i in range(num_subgraphs):
-            num_edges_in_subgraph = og_edge_index[0].shape[-1]
-            attn_subgraphs.append(attn[-1][:(i+1)*num_edges_in_subgraph])
+            num_edges_in_subgraph = og_edge_index[i].shape[-1]
+            attn_subgraphs.append(attn[-1][prev_num_edges:prev_num_edges+num_edges_in_subgraph])
+            prev_num_edges = num_edges_in_subgraph
         return attn_subgraphs
 
     def get_bottom_k(self,attn_subgraphs):
@@ -222,11 +226,11 @@ class QAGNN(nn.Module):
 
         gnn_output,attn = self.gnn(gnn_input, adj, node_type_ids, node_scores)
 
-        attn_subgraphs = self.break_attn_values_into_subgraphs(attn,og_edge_type,og_edge_index)
-        top_k = self.get_top_k(attn_subgraphs)
-        bottom_k = self.get_bottom_k(attn_subgraphs)
-
-        self.save_numpy_files(top_k,bottom_k,q_ids)
+        # attn_subgraphs = self.break_attn_values_into_subgraphs(attn,og_edge_type,og_edge_index)
+        # top_k = self.get_top_k(attn_subgraphs)
+        # bottom_k = self.get_bottom_k(attn_subgraphs)
+        #
+        # self.save_numpy_files(top_k,bottom_k,q_ids)
 
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
 
@@ -262,6 +266,19 @@ class LM_QAGNN(nn.Module):
                                         pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb,
                                         init_range=init_range)
 
+    def mask_subgraphs(self,q_ids, edge_type, edge_index):
+        top_k_ = np.load(f"./bottom_k/{q_ids[0]}.npy",allow_pickle=True)
+
+        for subgraph in range(len(edge_type)):
+            idxs = top_k_[subgraph].flatten()
+            edge_index_subgraph = edge_index[subgraph].to("cpu").numpy()
+            edge_index_subgraph = np.delete(edge_index_subgraph, idxs, axis=-1)
+            edge_index[subgraph] = torch.LongTensor(edge_index_subgraph).cuda()
+            edge_type_subgraph = edge_type[subgraph].to("cpu").numpy()
+            edge_type_subgraph = np.delete(edge_type_subgraph, idxs, axis=-1)
+            edge_type[subgraph] = torch.LongTensor(edge_type_subgraph).cuda()
+        return edge_type,edge_index
+
 
     def forward(self,q_ids, *inputs, layer_id=-1, cache_output=False, detail=False):
         """
@@ -286,6 +303,9 @@ class LM_QAGNN(nn.Module):
 
         og_edge_index = edge_index
         og_edge_type = edge_type
+
+        # if os.path.isfile(f"bottom_k/{q_ids[0]}.npy"):
+        #     edge_type,edge_index = self.mask_subgraphs(q_ids,edge_type,edge_index)
 
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
         adj = (edge_index.to(node_type_ids.device), edge_type.to(node_type_ids.device)) #edge_index: [2, total_E]   edge_type: [total_E, ]
