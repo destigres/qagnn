@@ -31,3 +31,4 @@ python3 -u qagnn.py --dataset $dataset \
       --mode eval_detail \
       --load_model_path saved_models/csqa_model_hf3.4.0.pt \
       $args
+      # --dataset csqa --train_adj data/csqa/graph/train.graph.adj.pk --dev_adj data/csqa/graph/dev.graph.adj.pk --test_adj  data/csqa/graph/test.graph.adj.pk --train_statements data/csqa/statement/train.statement.jsonl --dev_statements  data/csqa/statement/dev.statement.jsonl --test_statements  data/csqa/statement/test.statement.jsonl --save_model --save_dir saved_models --mode eval_detail --load_model_path saved_models/csqa_model_hf3.4.0.pt
