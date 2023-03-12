@@ -99,8 +99,7 @@ def load_sparse_adj_data_with_contextnode(adj_pk_path, max_node_num, num_choice,
 
         adj_lengths_ori = adj_lengths.clone()
         for idx, _data in tqdm(enumerate(adj_concept_pairs), total=n_samples, desc='loading adj matrices'):
-            adj, concepts, qm, am, cid2score = _data['adj'], _data['concepts'], _data['qmask'], _data['amask'], _data['cid2score'] #(num entity_rel, num entity) - adj shape
-
+            adj, concepts, qm, am, cid2score = _data['adj'], _data['concepts'], _data['qmask'], _data['amask'], _data['cid2score']
             #adj: e.g. <4233x249 (n_nodes*half_n_rels x n_nodes) sparse matrix of type '<class 'numpy.bool'>' with 2905 stored elements in COOrdinate format>
             #concepts: np.array(num_nodes, ), where entry is concept id
             #qm: np.array(num_nodes, ), where entry is True/False
@@ -140,20 +139,20 @@ def load_sparse_adj_data_with_contextnode(adj_pk_path, max_node_num, num_choice,
             ij = torch.tensor(adj.row, dtype=torch.int64) #(num_matrix_entries, ), where each entry is coordinate
             k = torch.tensor(adj.col, dtype=torch.int64)  #(num_matrix_entries, ), where each entry is coordinate
             n_node = adj.shape[1]
-            half_n_rel = adj.shape[0] // n_node # only number of relations. doubled to accom inverse relations
-            i, j = ij // n_node, ij % n_node # get idx in (number of relations, number of concepts, number of number of concepts) // to get second to lst, % to get last
+            half_n_rel = adj.shape[0] // n_node
+            i, j = ij // n_node, ij % n_node
 
             #Prepare edges
-            i += 2; j += 1; k += 1  # **** increment coordinate by 1, rel_id by 2 **** ## increment node id by 1 to accom context node, 2 for relations to accom relation between context node + node
+            i += 2; j += 1; k += 1  # **** increment coordinate by 1, rel_id by 2 ****
             extra_i, extra_j, extra_k = [], [], []
             for _coord, q_tf in enumerate(qm):
-                _new_coord = _coord + 1 ## offset the context node
+                _new_coord = _coord + 1
                 if _new_coord > num_concept:
                     break
                 if q_tf:
-                    extra_i.append(0) #rel from contextnode to question concept ## relation is the first dim in the coord system
-                    extra_j.append(0) #contextnode coordinate  ## head is the seocnd dim in the coord system
-                    extra_k.append(_new_coord) #question concept coordinate ## tail is the final dim in the coord system
+                    extra_i.append(0) #rel from contextnode to question concept
+                    extra_j.append(0) #contextnode coordinate
+                    extra_k.append(_new_coord) #question concept coordinate
             for _coord, a_tf in enumerate(am):
                 _new_coord = _coord + 1
                 if _new_coord > num_concept:
@@ -163,17 +162,17 @@ def load_sparse_adj_data_with_contextnode(adj_pk_path, max_node_num, num_choice,
                     extra_j.append(0) #contextnode coordinate
                     extra_k.append(_new_coord) #answer concept coordinate
 
-            half_n_rel += 2 #should be 19 now becuase we added a relation from context ndoe to a question ndoe + conext node to a answer node
-            if len(extra_i) > 0: ## if there no in the concepts in the question + no concepts in the answers  ## we're adding the Z node here
-                i = torch.cat([i, torch.tensor(extra_i)], dim=0) ## relation id (i += 10) (for j and  as well)
-                j = torch.cat([j, torch.tensor(extra_j)], dim=0) ## head
-                k = torch.cat([k, torch.tensor(extra_k)], dim=0) ## tail
+            half_n_rel += 2 #should be 19 now
+            if len(extra_i) > 0:
+                i = torch.cat([i, torch.tensor(extra_i)], dim=0)
+                j = torch.cat([j, torch.tensor(extra_j)], dim=0)
+                k = torch.cat([k, torch.tensor(extra_k)], dim=0)
             ########################
 
             mask = (j < max_node_num) & (k < max_node_num)
             i, j, k = i[mask], j[mask], k[mask]
             i, j, k = torch.cat((i, i + half_n_rel), 0), torch.cat((j, k), 0), torch.cat((k, j), 0)  # add inverse relations
-            edge_index.append(torch.stack([j,k], dim=0)) #each entry is [2, E] -- (cords)
+            edge_index.append(torch.stack([j,k], dim=0)) #each entry is [2, E]
             edge_type.append(i) #each entry is [E, ]
 
         with open(cache_path, 'wb') as f:

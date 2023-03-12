@@ -31,7 +31,7 @@ def evaluate_accuracy(eval_set, model):
     n_samples, n_correct = 0, 0
     model.eval()
     with torch.no_grad():
-        for qids, labels, *input_data in tqdm(eval_set): # tuple([batch_qids, batch_labels, *batch_tensors0, *batch_lists0, *batch_tensors1, *batch_lists1, edge_index, edge_type])
+        for qids, labels, *input_data in tqdm(eval_set):
             logits, _ = model(*input_data)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
@@ -41,10 +41,10 @@ def evaluate_accuracy(eval_set, model):
 def main():
     parser = get_parser()
     args, _ = parser.parse_known_args()
-    parser.add_argument('--mode', default='eval_detail', choices=['train', 'eval_detail'], help='run training or evaluation')
+    parser.add_argument('--mode', default='train', choices=['train', 'eval_detail'], help='run training or evaluation')
     parser.add_argument('--save_dir', default=f'./saved_models/qagnn/', help='model output directory')
     parser.add_argument('--save_model', dest='save_model', action='store_true')
-    parser.add_argument('--load_model_path', default="./saved_models/cqsa/csqa_model_hf3.4.0.pt")
+    parser.add_argument('--load_model_path', default=None)
 
 
     # data
