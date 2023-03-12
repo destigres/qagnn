@@ -1,8 +1,10 @@
+import numpy as np
+
 from modeling.modeling_encoder import TextEncoder, MODEL_NAME_TO_CLASS
 from utils.data_utils import *
 from utils.layers import *
 import torch.nn.functional as F
-
+import torch
 
 class QAGNN_Message_Passing(nn.Module):
     def __init__(self, args, k, n_ntype, n_etype, input_size, hidden_size, output_size,
@@ -41,13 +43,21 @@ class QAGNN_Message_Passing(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.dropout_rate = dropout
 
+    # def get_top_k_indices(self,att,k):
+    #     top_k_indices = torch.topk(torch.mean(att[-1],dim=-1)[:len(att[-1])-1000],k)
+    #     return
+    # def get_bottom_k_indices(self,att,k):
+    #     top_k_indices =  torch.topk(torch.mean(att[-1],dim=-1)[:len(att[-1])-1000],k,largest=False)
+    #     return
+
 
     def mp_helper(self, _X, edge_index, edge_type, _node_type, _node_feature_extra):
         for _ in range(self.k):
-            _X = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
+            _X,att = self.gnn_layers[_](_X, edge_index, edge_type, _node_type, _node_feature_extra)
             _X = self.activation(_X)
             _X = F.dropout(_X, self.dropout_rate, training = self.training)
-        return _X
+        return _X,att
+
 
 
     def forward(self, H, A, node_type, node_score, cache_output=False):
@@ -81,18 +91,18 @@ class QAGNN_Message_Passing(nn.Module):
 
         X = H
         edge_index, edge_type = A #edge_index: [2, total_E]   edge_type: [total_E, ]  where total_E is for the batched graph
-        _X = X.view(-1, X.size(2)).contiguous() #[`total_n_nodes`, d_node] where `total_n_nodes` = b_size * n_node
+        _X = X.view(-1, X.size(2)).contiguous() #[`total_n_nodes`, d_node] where `total_n_nodes` = b_size * n_node// bs * num_nodes * n_dim
         _node_type = node_type.view(-1).contiguous() #[`total_n_nodes`, ]
         _node_feature_extra = torch.cat([node_type_emb, node_score_emb], dim=2).view(_node_type.size(0), -1).contiguous() #[`total_n_nodes`, dim]
 
-        _X = self.mp_helper(_X, edge_index, edge_type, _node_type, _node_feature_extra)
+        _X, att = self.mp_helper(_X, edge_index, edge_type, _node_type, _node_feature_extra)
 
         X = _X.view(node_type.size(0), node_type.size(1), -1) #[batch_size, n_node, dim]
 
         output = self.activation(self.Vh(H) + self.Vx(X))
         output = self.dropout(output)
 
-        return output
+        return output,att
 
 
 
@@ -137,8 +147,51 @@ class QAGNN(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+    def get_top_k(self,attn_subgraphs):
+        num_subgraphs = len(attn_subgraphs)
+        top_k_subgraphs = []
+        for i in range(num_subgraphs):
+            top_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * .1)
+            indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices
+            if indices.is_cuda:
+                indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices.cpu().numpy()
+            else:
+                indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10, largest=True).indices.numpy()
+            top_k_subgraphs.append(indices)
+        return top_k_subgraphs
 
-    def forward(self, sent_vecs, concept_ids, node_type_ids, node_scores, adj_lengths, adj, emb_data=None, cache_output=False):
+
+    def break_attn_values_into_subgraphs(self,attn,og_edge_type,og_edge_index):
+        num_subgraphs = len(og_edge_index)
+        attn_subgraphs = []
+        for i in range(num_subgraphs):
+            num_edges_in_subgraph = og_edge_index[0].shape[-1]
+            attn_subgraphs.append(attn[-1][:(i+1)*num_edges_in_subgraph])
+        return attn_subgraphs
+
+    def get_bottom_k(self,attn_subgraphs):
+        num_subgraphs = len(attn_subgraphs)
+        top_k_subgraphs = []
+        for i in range(num_subgraphs):
+            bottom_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * .1)
+            indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10,largest=False).indices
+            if indices.is_cuda:
+                indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10,largest=False).indices.cpu().numpy()
+            else:
+                indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10, largest=False).indices.numpy()
+            top_k_subgraphs.append(
+                indices
+            )
+        return top_k_subgraphs
+
+    def save_numpy_files(self,top_k,bottom_k,q_ids):
+        q_id = q_ids[0]
+        top_k_np = np.array(top_k,dtype=object)
+        bottom_k_np = np.array(bottom_k,dtype=object)
+        np.save(f"./bottom_k/{q_id}.npy",bottom_k_np)
+        np.save(f"./top_k/{q_id}.npy",top_k_np)
+
+    def forward(self, sent_vecs, concept_ids, node_type_ids, node_scores, adj_lengths, adj, og_edge_index,og_edge_type,q_ids, emb_data=None, cache_output=False):
         """
         sent_vecs: (batch_size, dim_sent)
         concept_ids: (batch_size, n_node)
@@ -167,7 +220,13 @@ class QAGNN(nn.Module):
         node_scores = node_scores.unsqueeze(2) #[batch_size, n_node, 1]
 
 
-        gnn_output = self.gnn(gnn_input, adj, node_type_ids, node_scores)
+        gnn_output,attn = self.gnn(gnn_input, adj, node_type_ids, node_scores)
+
+        attn_subgraphs = self.break_attn_values_into_subgraphs(attn,og_edge_type,og_edge_index)
+        top_k = self.get_top_k(attn_subgraphs)
+        bottom_k = self.get_bottom_k(attn_subgraphs)
+
+        self.save_numpy_files(top_k,bottom_k,q_ids)
 
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
 
@@ -204,7 +263,7 @@ class LM_QAGNN(nn.Module):
                                         init_range=init_range)
 
 
-    def forward(self, *inputs, layer_id=-1, cache_output=False, detail=False):
+    def forward(self,q_ids, *inputs, layer_id=-1, cache_output=False, detail=False):
         """
         sent_vecs: (batch_size, num_choice, d_sent)    -> (batch_size * num_choice, d_sent)
         concept_ids: (batch_size, num_choice, n_node)  -> (batch_size * num_choice, n_node)
@@ -224,6 +283,10 @@ class LM_QAGNN(nn.Module):
         _inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:-6]] + [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[-6:-2]] + [sum(x,[]) for x in inputs[-2:]]
 
         *lm_inputs, concept_ids, node_type_ids, node_scores, adj_lengths, edge_index, edge_type = _inputs
+
+        og_edge_index = edge_index
+        og_edge_type = edge_type
+
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
         adj = (edge_index.to(node_type_ids.device), edge_type.to(node_type_ids.device)) #edge_index: [2, total_E]   edge_type: [total_E, ]
 
@@ -231,7 +294,10 @@ class LM_QAGNN(nn.Module):
         logits, attn = self.decoder(sent_vecs.to(node_type_ids.device),
                                     concept_ids,
                                     node_type_ids, node_scores, adj_lengths, adj,
-                                    emb_data=None, cache_output=cache_output)
+                                    og_edge_index, og_edge_type,
+                                    q_ids,
+                                    emb_data=None, cache_output=cache_output,
+                                    )
         logits = logits.view(bs, nc)
         if not detail:
             return logits, attn
@@ -249,6 +315,7 @@ class LM_QAGNN(nn.Module):
         edge_index = torch.cat(edge_index, dim=1) #[2, total_E]
         edge_type = torch.cat(edge_type_init, dim=0) #[total_E, ]
         return edge_index, edge_type
+
 
 
 
@@ -408,7 +475,7 @@ class GATConvE(MessagePassing):
         self.mlp = torch.nn.Sequential(torch.nn.Linear(emb_dim, emb_dim), torch.nn.BatchNorm1d(emb_dim), torch.nn.ReLU(), torch.nn.Linear(emb_dim, emb_dim))
 
 
-    def forward(self, x, edge_index, edge_type, node_type, node_feature_extra, return_attention_weights=False):
+    def forward(self, x, edge_index, edge_type, node_type, node_feature_extra, return_attention_weights=True):
         # x: [N, emb_dim]
         # edge_index: [2, E]
         # edge_type [E,] -> edge_attr: [E, 39] / self_edge_attr: [N, 39]
@@ -432,9 +499,9 @@ class GATConvE(MessagePassing):
         headtail_vec = torch.cat([headtail_vec, self_headtail_vec], dim=0) #[E+N, ?]
         edge_embeddings = self.edge_encoder(torch.cat([edge_vec, headtail_vec], dim=1)) #[E+N, emb_dim]
 
-        #Add self loops to edge_index
+        #Add self loops to edge_index - why???
         loop_index = torch.arange(0, x.size(0), dtype=torch.long, device=edge_index.device)
-        loop_index = loop_index.unsqueeze(0).repeat(2, 1)
+        loop_index = loop_index.unsqueeze(0).repeat(2, 1) #[2,1000]
         edge_index = torch.cat([edge_index, loop_index], dim=1)  #[2, E+N]
 
         x = torch.cat([x, node_feature_extra], dim=1)
@@ -447,7 +514,7 @@ class GATConvE(MessagePassing):
 
         if return_attention_weights:
             assert alpha is not None
-            return out, (edge_index, alpha)
+            return out, (edge_index,alpha)
         else:
             return out
 

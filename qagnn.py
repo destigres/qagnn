@@ -32,7 +32,7 @@ def evaluate_accuracy(eval_set, model):
     model.eval()
     with torch.no_grad():
         for qids, labels, *input_data in tqdm(eval_set):
-            logits, _ = model(*input_data)
+            logits, _ = model(qids,*input_data)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
     return n_correct / n_samples
@@ -41,10 +41,10 @@ def evaluate_accuracy(eval_set, model):
 def main():
     parser = get_parser()
     args, _ = parser.parse_known_args()
-    parser.add_argument('--mode', default='train', choices=['train', 'eval_detail'], help='run training or evaluation')
-    parser.add_argument('--save_dir', default=f'./saved_models/qagnn/', help='model output directory')
+    parser.add_argument('--mode', default='eval_detail', choices=['train', 'eval_detail'], help='run training or evaluation')
+    parser.add_argument('--save_dir', default=f'./saved_models/cqsa/', help='model output directory')
     parser.add_argument('--save_model', dest='save_model', action='store_true')
-    parser.add_argument('--load_model_path', default=None)
+    parser.add_argument('--load_model_path', default="./saved_models/cqsa/csqa_model_hf3.4.0.pt")
 
 
     # data
@@ -76,7 +76,7 @@ def main():
     # optimization
     parser.add_argument('-dlr', '--decoder_lr', default=DECODER_DEFAULT_LR[args.dataset], type=float, help='learning rate')
     parser.add_argument('-mbs', '--mini_batch_size', default=1, type=int)
-    parser.add_argument('-ebs', '--eval_batch_size', default=2, type=int)
+    parser.add_argument('-ebs', '--eval_batch_size', default=1, type=int)
     parser.add_argument('--unfreeze_epoch', default=4, type=int)
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
     parser.add_argument('--fp16', default=False, type=bool_flag, help='use fp16 training. this requires torch>=1.6.0')
