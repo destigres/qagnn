@@ -1,6 +1,7 @@
 from modeling.modeling_encoder import TextEncoder, MODEL_NAME_TO_CLASS
 from utils.data_utils import *
 from utils.layers import *
+import json
 import numpy as np
 import torch.nn.functional as F
 
@@ -124,6 +125,8 @@ class QAGNN(nn.Module):
 
         self.dropout_e = nn.Dropout(p_emb)
         self.dropout_fc = nn.Dropout(p_fc)
+        self.save = False
+        self.batch_number = -1
 
         if init_range > 0:
             self.apply(self._init_weights)
@@ -169,6 +172,11 @@ class QAGNN(nn.Module):
         node_scores = node_scores / (mean_norm.unsqueeze(1) + 1e-05) #[batch_size, n_node]
         node_scores = node_scores.unsqueeze(2) #[batch_size, n_node, 1]
 
+        self.batch_number += 1
+
+        if self.save:
+            np.save(os.path.join('node_scores', str(self.batch_number) + '.npy'), node_scores.cpu())
+
         gnn_output = self.gnn(gnn_input, adj, node_type_ids, node_scores)
 
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
@@ -204,8 +212,12 @@ class LM_QAGNN(nn.Module):
                                         fc_dim, n_fc_layer, p_emb, p_gnn, p_fc,
                                         pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb,
                                         init_range=init_range)
-        self.mask_edges = False
+        self.mask_edges_attn = False
+        self.mask_edges_scores = True
         self.batch_number = -1
+
+        self.fout = open('graph.json')
+        self.output = []
 
     def reset_batch_number(self):
         self.batch_number = -1
@@ -235,8 +247,59 @@ class LM_QAGNN(nn.Module):
         edge_lengths = [arr.size(1) for arr in edge_index]
 
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
+        n_nodes = concept_ids.size(1)
 
-        if self.mask_edges:
+        if self.mask_edges_scores:
+            node_scores_npy = np.load(os.path.join('node_scores', str(self.batch_number) + '.npy'))
+
+            curr_length = 0
+            edge_index_arr, edge_type_arr = [], []
+
+            for node_score, adj_length, edge_length in zip(node_scores_npy, adj_lengths, edge_lengths):
+                node_score = torch.reshape(torch.tensor(node_score), (node_score.size,))
+                sorted, indices = torch.sort(torch.tensor(np.ravel(node_score[:adj_length])))
+                # Bottom 10
+                mask_indices = indices[:int(0.1 * len(indices))]
+                # Top 10
+                # mask_indices = indices[int(0.9 * len(indices)):]
+
+                edge_index_sliced = edge_index[:, curr_length:curr_length + edge_length]
+                edge_type_sliced = edge_type[curr_length:curr_length + edge_length]
+                edge_index_sliced_masked = []
+                edge_type_sliced_masked = []
+
+                for vals, edge_type_val in zip(edge_index_sliced.T, edge_type_sliced):
+                    val1, val2 = vals.tolist()
+
+                    if (val1 % n_nodes) % 200 in mask_indices or (val2 % n_nodes) % 200 in mask_indices:
+                        continue
+
+                    edge_index_sliced_masked.append((val1, val2))
+                    edge_type_sliced_masked.append(edge_type_val)
+
+                edge_index_sliced_masked = torch.tensor(edge_index_sliced_masked)
+                edge_type_sliced_masked = torch.tensor(edge_type_sliced_masked)
+
+                edge_index_arr.append(edge_index_sliced_masked.T)
+                edge_type_arr.append(edge_type_sliced_masked)
+
+                output.append({
+                    'edge_index': edge_index_sliced,
+                    'edge_type': edge_type_sliced,
+                    'edge_index_new': edge_index_arr[-1].tolist(),
+                    'edge_type_new': edge_type_arr[-1].tolist()
+                })
+
+
+                print(output)
+                self.fout.write(json.dumps(output))
+
+                curr_length += edge_length
+
+            edge_index = torch.cat(edge_index_arr, dim=1).type(torch.int64)
+            edge_type = torch.cat(edge_type_arr, dim=0).type(torch.int64)
+
+        if self.mask_edges_attn:
             attention_vals = np.load(os.path.join('batch_attentions', str(self.batch_number) + '.npy'))
             attention_vals = np.mean(attention_vals, axis=1)
             attention_vals = attention_vals[:edge_index.size(dim=1)]
@@ -397,7 +460,7 @@ def make_one_hot(labels, C):
     '''
     labels = labels.unsqueeze(1)
     one_hot = torch.FloatTensor(labels.size(0), C).zero_().to(labels.device)
-    target = one_hot.scatter_(1, labels.data, 1)
+    target = one_hot.scatter_(1, labels.data.type(torch.int64), 1)
     target = Variable(target)
     return target
 
