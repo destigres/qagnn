@@ -198,8 +198,6 @@ def load_sparse_adj_data_with_contextnode(adj_pk_path, max_node_num, num_choice,
 
 
 
-
-
 def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
     def _truncate_seq_pair(tokens_a, tokens_b, max_length):
         """Truncates a sequence pair in place to the maximum length."""
