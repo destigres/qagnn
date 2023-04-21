@@ -1,3 +1,6 @@
+import json
+import math
+
 import numpy as np
 
 from modeling.modeling_encoder import TextEncoder, MODEL_NAME_TO_CLASS
@@ -5,6 +8,8 @@ from utils.data_utils import *
 from utils.layers import *
 import torch.nn.functional as F
 import torch
+from json.decoder import JSONDecodeError
+import h5py
 
 class QAGNN_Message_Passing(nn.Module):
     def __init__(self, args, k, n_ntype, n_etype, input_size, hidden_size, output_size,
@@ -111,7 +116,7 @@ class QAGNN(nn.Module):
                  n_concept, concept_dim, concept_in_dim, n_attention_head,
                  fc_dim, n_fc_layer, p_emb, p_gnn, p_fc,
                  pretrained_concept_emb=None, freeze_ent_emb=True,
-                 init_range=0.02):
+                 init_range=0.02,generate=False,num_edges_per_subgraph=.20):
         super().__init__()
         self.init_range = init_range
 
@@ -121,6 +126,9 @@ class QAGNN(nn.Module):
         self.svec2nvec = nn.Linear(sent_dim, concept_dim)
 
         self.concept_dim = concept_dim
+
+        self.generate = generate
+        self.num_edges_per_subgraph = num_edges_per_subgraph
 
         self.activation = GELU()
 
@@ -136,7 +144,17 @@ class QAGNN(nn.Module):
 
         if init_range > 0:
             self.apply(self._init_weights)
-
+        self.num_times = 0
+        self.total = 0
+        self.top_ten_indices = 0
+        self.bottom_ten_indices = 0
+        self.total_indices = 0
+        self.top_mean_edges = 0
+        self.bottom_mean_edges = 0
+        self.top_percents = []
+        self.bottom_percents = []
+        self.idx = 0
+        self.max_num_edges = 0
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -147,12 +165,19 @@ class QAGNN(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-    def get_top_k(self,attn_subgraphs):
+    def get_top_k(self,attn_subgraphs,og_edge_type,og_edge_idx):
         num_subgraphs = len(attn_subgraphs)
         top_k_subgraphs = []
         for i in range(num_subgraphs):
-            top_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * .1)
+            top_10 = math.ceil(len(torch.mean(attn_subgraphs[i], -1)) * .1)
             indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices
+            top_10_indices = set(og_edge_idx[i].T[indices.cpu().numpy()].cpu().numpy().flatten())
+            self.top_ten_indices += len(top_10_indices)
+            mean_edges = np.mean([len(torch.where(og_edge_idx[i].T == j)[0].numpy()) for j in top_10_indices])
+            if np.isnan(mean_edges):
+                self.top_mean_edges += 0
+            else:
+                self.top_mean_edges += mean_edges
             if indices.is_cuda:
                 indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices.cpu().numpy()
             else:
@@ -168,17 +193,26 @@ class QAGNN(nn.Module):
         attn_subgraphs = []
         prev_num_edges = 0
         for i in range(num_subgraphs):
-            num_edges_in_subgraph = og_edge_index[i].shape[-1]
+            idxs_belonging_to_subgraph = torch.where(sum(attn[0].T[..., :1].flatten() == i for i in set(range(800, 1000))).bool() == True)[0]
+
             attn_subgraphs.append(attn[-1][prev_num_edges:prev_num_edges+num_edges_in_subgraph])
             prev_num_edges = num_edges_in_subgraph
         return attn_subgraphs
 
-    def get_bottom_k(self,attn_subgraphs):
+    def get_bottom_k(self,attn_subgraphs,og_edge_type,og_edge_idx):
         num_subgraphs = len(attn_subgraphs)
         top_k_subgraphs = []
         for i in range(num_subgraphs):
-            bottom_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * .1)
+            bottom_10 = math.ceil(len(torch.mean(attn_subgraphs[i], -1)) * .1)
             indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10,largest=False).indices
+            bottom_10_indices = set(og_edge_idx[i].T[indices.cpu().numpy()].cpu().numpy().flatten())
+            self.bottom_ten_indices += len(bottom_10_indices)
+            mean_edges = np.mean([len(torch.where(og_edge_idx[i].T == j)[0].numpy()) for j in bottom_10_indices])
+            if np.isnan(mean_edges):
+                self.top_mean_edges += 0
+            else:
+                self.bottom_mean_edges += mean_edges
+
             if indices.is_cuda:
                 indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10,largest=False).indices.cpu().numpy()
             else:
@@ -187,7 +221,168 @@ class QAGNN(nn.Module):
                 indices
             )
         return top_k_subgraphs
+    def get_attn_stats(self,attn,og_edge_idx,og_edge_type,node_type_ids,q_id):
+        edge_indices,attn_values = attn
+        num_subgraphs = len(node_type_ids)
+        ## there are self loops between nodes i.e. [0,0] ; [1,1] ... [999,999]
+        for i in range(num_subgraphs):
+            # edge_idxs_in_graph_i = torch.where(sum(edge_indices.T[..., :1].flatten() == j for j in set(range(i*200, (i+1)*200))).bool() == True)
+            offset = i * 200
+            num_edge_indices_per_src_node_in_graph_i = [len(torch.where(edge_indices.T[..., :1].flatten() == j)[0].cpu()) for j in range(0+offset,200+offset)]
+            num_edge_indices_per_src_node_in_graph_i_sorted = np.argsort(num_edge_indices_per_src_node_in_graph_i)
+            max_graph_node_i = num_edge_indices_per_src_node_in_graph_i_sorted[199]
+            min_graph_node_i = num_edge_indices_per_src_node_in_graph_i_sorted[0]
 
+            max_src_node_idx = max_graph_node_i + offset
+            min_src_node_idx = min_graph_node_i + offset
+            edges_with_src_node_max_edge_idx = torch.where(edge_indices.T[..., :1].flatten() == max_src_node_idx)[0].cpu()
+            edges_with_src_node_min_edge_idx = torch.where(edge_indices.T[..., :1].flatten() == min_src_node_idx)[0].cpu()
+
+            assert len(edges_with_src_node_max_edge_idx) >= len(edges_with_src_node_min_edge_idx) ## sanity check to ensure that node we've identifed w/ max number of edges has in fact more edges
+
+            attn_over_edges_with_max_src_node = attn_values[edges_with_src_node_max_edge_idx]
+            attn_over_edges_with_min_src_node = attn_values[edges_with_src_node_min_edge_idx]
+            assert torch.abs(torch.sum(torch.mean(attn_over_edges_with_max_src_node,dim=-1))-1) <= .001 ## checking to see that attn values over edges is ~1
+            assert torch.abs(torch.sum(torch.mean(attn_over_edges_with_min_src_node,dim=-1))-1) <= .001## checking to see that attn values over edges is ~1
+
+            avg_attn_on_max_connected_edge_in_graph_i = torch.mean(torch.mean(attn_over_edges_with_max_src_node,dim=-1))
+            avg_attn_on_min_connected_edge_in_graph_i = torch.mean(torch.mean(attn_over_edges_with_min_src_node,dim=-1))
+            if avg_attn_on_min_connected_edge_in_graph_i >= avg_attn_on_max_connected_edge_in_graph_i:
+                self.num_times += 1
+            self.total += 1
+
+    # get_edges_for_deletion(self,relevant_nodes_idxs,)
+    def get_edges_for_deletion_based_on_node_relevance(self,subgraph_idx,edge_indices,edge_idxs_subgraph_i,node_scores,attn_values,edge_to_type,mode,percent_to_mask,pad_to):
+        ## there are self loops between nodes i.e. [0,0] ; [1,1] ... [999,999] - we'll ignore these + any edges out of context node + any edges to context node -- no benefit
+        context_node = 200 * (subgraph_idx)
+        num_edges_to_mask = int(len(edge_idxs_subgraph_i) * percent_to_mask)
+        edge_idxs_mask = []
+        descending = mode == 'top'
+        relevant_node_idxs_sorted = (torch.argsort(node_scores[subgraph_idx].flatten()[1:],descending=descending) + 1).cpu().numpy().tolist() #we're ignoring context node z.
+        assert 0 not in relevant_node_idxs_sorted # assert #we're ignoring context node z.
+        if mode == 'top':
+            relevant_nodes = relevant_node_idxs_sorted
+        else:
+            relevant_nodes = relevant_node_idxs_sorted
+        for node in relevant_nodes:
+            avail_edges_idxs = torch.where((edge_indices.T[...,0] == node) & (edge_indices.T[...,1] != context_node)  & (edge_indices.T[...,1] != node))
+            k = max(min(len(attn_values[avail_edges_idxs])-1,abs(len(edge_idxs_mask)-num_edges_to_mask)//2),0)
+            top_edges = torch.topk(torch.mean(attn_values[avail_edges_idxs], dim=-1),k=k,largest=descending).indices
+            edge_idxs_mask += edge_indices.T[avail_edges_idxs[0][top_edges]].cpu().numpy().tolist()
+            edge_idxs_mask += [[edge[1],edge[0]] for edge in edge_indices.T[avail_edges_idxs[0][top_edges]].cpu().numpy().tolist()]
+            if len(edge_idxs_mask) >= num_edges_to_mask:
+                break
+        edges_to_mask, edge_types_of_masked = np.array(edge_idxs_mask)[:num_edges_to_mask],\
+             np.array([edge_to_type[tuple(edge)] for edge in edge_idxs_mask])[:num_edges_to_mask]
+        to_pad = pad_to - len(edges_to_mask)
+        edges_to_mask_pad = np.array(edges_to_mask.tolist() + np.negative(np.ones((to_pad, 2))).tolist())
+        edge_types_of_masked_pad = np.array(edge_types_of_masked.tolist() + np.negative(np.ones((to_pad,))).tolist())
+        return edges_to_mask_pad,edge_types_of_masked_pad,edges_to_mask,edge_types_of_masked
+
+    def get_edges_to_mask(self,attn,node_scores,og_edge_index,og_edge_type,node_type_ids,q_id,concept_ids):
+        # seeing redudant edge....
+        question_dict = {}
+        with open('/our_dataset/version_1/id_qa_map.pkl', 'rb') as file:
+            question_dict = pickle.load(file)
+        f = h5py.File('./our_dataset/version_1/csqa_dev.hdf5','r+')
+
+        f.require_dataset("concept_ids",(1221,5,200),maxshape=(1221,5,200),dtype="int64")
+        f.require_dataset("node_scores",(1221,5,200,1),dtype="float32")
+        f.require_dataset("ground_truth_edge_types",(1221,5,6000),dtype="int64")
+        f.require_dataset("ground_truth_adj",(1221,5,6000,2),dtype="int64")
+        f.require_dataset("ground_attn",(1221,5,6000,4),dtype="float64")
+
+        f.require_dataset("most_damaging_edges",(1221,5,1200,2),dtype="int64")
+        f.require_dataset("most_damaging_edge_types",(1221,5,1200,),dtype="int64")
+
+        f.require_dataset("least_damaging_edges", (1221, 5, 1200,2), dtype="int64")
+        f.require_dataset("least_damaging_edge_types", (1221, 5, 1200,), dtype="int64")
+
+        f["concept_ids"][self.idx] = concept_ids.detach().cpu().numpy()
+        f["node_scores"][self.idx] = node_scores.detach().cpu().numpy()
+        edge_indices, attn_values = attn
+
+        num_subgraphs = len(node_type_ids)
+        ## there are self loops between nodes i.e. [0,0] ; [1,1] ... [999,999] - we'll ignore these + any edges out of context node + any edges to context node -- no benefit
+        edge_to_type = {}
+
+        for node in range(0, 200):
+            edge_to_type[tuple([node, node])] = 99
+        edge_to_type[tuple([-1, -1])] = -1
+        top,bottom = [],[]
+        most_damaging_edges_list,most_damaging_edge_types_list = [],[]
+        least_damaging_edges_list,least_damaging_edge_types_list = [],[]
+        ground_truth_edges_list,ground_truth_edge_types_list,ground_truth_attn_list = [],[],[]
+
+        for i in range(num_subgraphs):
+            beg = i * 200
+            end = (i + 1) * 200
+            for edge,type in zip(og_edge_index[i].T.cpu().numpy(),og_edge_type[i].cpu().numpy()):
+                edge_to_type[tuple(edge)] = type
+            #paded  edge
+            edges_idxs_in_subgraph_i = torch.where(sum(edge_indices.T[..., :1].flatten() == j for j in set(range(beg, end))).bool() == True)[0]
+            edges_in_subgraph_i = edge_indices.T[edges_idxs_in_subgraph_i].cpu().numpy() - beg
+
+            to_pad = 6000 - len(edges_in_subgraph_i)
+            edges_in_subgraph_i_padded = np.array(edges_in_subgraph_i.tolist() + np.negative(np.ones((to_pad, 2))).tolist()) #need to do offsetting here
+
+            ground_truth_edges = edges_in_subgraph_i_padded
+            ground_truth_edges_types = np.array([edge_to_type[tuple(edge)] for edge in edges_in_subgraph_i_padded])
+
+            ground_truth_edge_types_list.append(ground_truth_edges_types)
+            ground_truth_edges_list.append(ground_truth_edges)
+            ground_truth_attn_list.append(np.array(attn_values[edges_idxs_in_subgraph_i].cpu().numpy().tolist() + np.negative(np.ones((to_pad,4))).tolist()))
+
+            least_damaging_edges,least_damaging_edge_types,top_edges,_ =  self.get_edges_for_deletion_based_on_node_relevance(i,edge_indices.cpu(),edges_idxs_in_subgraph_i.cpu(),node_scores.cpu(),attn_values.cpu(),edge_to_type,'top',.20,1200)
+            least_damaging_edges_list.append(least_damaging_edges)
+            least_damaging_edge_types_list.append(least_damaging_edge_types)
+
+            most_damaging_edges, most_damaging_edge_types,bottom_edges,_ = self.get_edges_for_deletion_based_on_node_relevance(i,edge_indices.cpu(),edges_idxs_in_subgraph_i.cpu(),node_scores.cpu(),attn_values.cpu(), edge_to_type,'bottom',.20,1200)
+
+            most_damaging_edges_list.append(most_damaging_edges)
+            most_damaging_edge_types_list.append(most_damaging_edge_types)
+
+            top.append(top_edges)
+            bottom.append(bottom_edges)
+
+        f['most_damaging_edges'][self.idx] = np.array(most_damaging_edges_list)
+        f['most_damaging_edge_types'][self.idx] = np.array(least_damaging_edge_types_list)
+
+        f['least_damaging_edges'][self.idx]= np.array(least_damaging_edges_list)
+        f['least_damaging_edge_types'][self.idx] = np.array(least_damaging_edge_types_list)
+        f['ground_truth_adj'][self.idx] = np.array(ground_truth_edges_list)
+        f['ground_truth_edge_types'][self.idx] = np.array(ground_truth_edge_types_list)
+        f['ground_attn'][self.idx] = np.array(ground_truth_attn_list)
+
+        f.close()
+        self.idx += 1
+        np.save(f"./top_k/{q_id}.npy",np.array(top))
+        np.save(f"./bottom_k/{q_id}.npy",np.array(bottom))
+
+
+    def get_damaging_2_nodes(self,attn_subgraphs,og_egde_idxs,node_type_ids,q_id):
+        num_subgraphs = len(attn_subgraphs)
+        answer_node_damaging_top = []
+        answer_node_damaging_bottom = []
+        for i in range(num_subgraphs):
+            answer_node = torch.where(node_type_ids[i] == 1)[0]
+            if len(answer_node) > 0:
+                if len(answer_node) > 1:
+                    answer_node = answer_node[0]
+                edges_involving_answer_node = torch.where(og_egde_idxs[i].T == answer_node)[0]
+                ten_percent = int(len(edges_involving_answer_node) * .1)
+                attn_sorted = torch.argsort(torch.mean(attn_subgraphs[i],dim=-1)[torch.where(og_egde_idxs[i].T == answer_node)[0]],descending=True)
+                top_ten = edges_involving_answer_node[attn_sorted[:ten_percent]]
+                answer_node_damaging_top.append(top_ten.cpu())
+                bottom_ten = edges_involving_answer_node[attn_sorted[-ten_percent:]]
+                answer_node_damaging_bottom.append(bottom_ten.cpu())
+            else:
+                answer_node_damaging_top.append([])
+                answer_node_damaging_bottom.append([])
+        top_k_np = np.array(answer_node_damaging_top, dtype=object)
+        bottom_k_np = np.array(answer_node_damaging_bottom, dtype=object)
+        np.save(f"./damaging_nodes/bottom_k/{q_id}.npy", bottom_k_np)
+        np.save(f"./damaging_nodes/top_k/{q_id}.npy", top_k_np)
     def save_numpy_files(self,top_k,bottom_k,q_ids):
         q_id = q_ids[0]
         top_k_np = np.array(top_k,dtype=object)
@@ -227,9 +422,13 @@ class QAGNN(nn.Module):
         gnn_output,attn = self.gnn(gnn_input, adj, node_type_ids, node_scores)
 
         # attn_subgraphs = self.break_attn_values_into_subgraphs(attn,og_edge_type,og_edge_index)
-        # top_k = self.get_top_k(attn_subgraphs)
-        # bottom_k = self.get_bottom_k(attn_subgraphs)
-        #
+        # self.get_attn_stats(attn,og_edge_index,og_edge_type,node_type_ids,q_ids[0])
+        # self.get_edges_to_mask(attn,node_scores,og_edge_index,og_edge_type,node_type_ids,q_ids[0],concept_ids)
+        # top_k = self.get_top_k(attn_subgraphs,og_edge_type,og_edge_index)
+        # bottom_k = self.get_bottom_k(attn_subgraphs,og_edge_type,og_edge_index)
+        # self.total_indices += np.sum(adj_lengths.cpu().numpy())
+        # self.total += 1
+
         # self.save_numpy_files(top_k,bottom_k,q_ids)
 
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
@@ -257,26 +456,41 @@ class LM_QAGNN(nn.Module):
                  n_concept, concept_dim, concept_in_dim, n_attention_head,
                  fc_dim, n_fc_layer, p_emb, p_gnn, p_fc,
                  pretrained_concept_emb=None, freeze_ent_emb=True,
-                 init_range=0.0, encoder_config={}):
+                 init_range=0.0, encoder_config={},
+                 generate=False,
+                 num_edges_per_subgraph=.2):
         super().__init__()
         self.encoder = TextEncoder(model_name, **encoder_config)
         self.decoder = QAGNN(args, k, n_ntype, n_etype, self.encoder.sent_dim,
                                         n_concept, concept_dim, concept_in_dim, n_attention_head,
                                         fc_dim, n_fc_layer, p_emb, p_gnn, p_fc,
                                         pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb,
-                                        init_range=init_range)
+                                        init_range=init_range,
+                                        generate=generate,
+                                        num_edges_per_subgraph=num_edges_per_subgraph)
 
     def mask_subgraphs(self,q_ids, edge_type, edge_index):
-        top_k_ = np.load(f"./bottom_k/{q_ids[0]}.npy",allow_pickle=True)
-
+        edges_to_mask_dict  = np.load(f"./top_k/{q_ids[0]}.npy", allow_pickle=True)
         for subgraph in range(len(edge_type)):
-            idxs = top_k_[subgraph].flatten()
-            edge_index_subgraph = edge_index[subgraph].to("cpu").numpy()
-            edge_index_subgraph = np.delete(edge_index_subgraph, idxs, axis=-1)
-            edge_index[subgraph] = torch.LongTensor(edge_index_subgraph).cuda()
-            edge_type_subgraph = edge_type[subgraph].to("cpu").numpy()
-            edge_type_subgraph = np.delete(edge_type_subgraph, idxs, axis=-1)
+            if not len(edges_to_mask_dict[subgraph]) > 0:
+                continue
+            edges_to_mask = edges_to_mask_dict[subgraph]
+            edges_to_mask = list([tuple(x) for x in edges_to_mask])
+            edge_idxs_to_mask = np.concatenate([torch.where((edge_index[subgraph].T[..., 0] == x[0]) & (edge_index[subgraph].T[..., 1] == x[1]))[0].cpu().numpy().flatten()
+                                                for x in edges_to_mask])
+            edge_index_subgraph = edge_index[subgraph].T.to("cpu").cpu().numpy()
+            edge_index_subgraph = np.delete(edge_index_subgraph, edge_idxs_to_mask, axis=0)
+            edge_index[subgraph] = torch.LongTensor(edge_index_subgraph.T).cuda()
+            edge_type_subgraph = edge_type[subgraph].to("cpu").cpu().numpy()
+            num_edges_From_context_node = len(np.where(edge_type_subgraph == 0)[0])
+            num_edges_to_context_node = len(np.where(edge_type_subgraph == 19)[0])
+            edge_type_subgraph = np.delete(edge_type_subgraph, edge_idxs_to_mask, axis=-1)
+            # assert len(np.where(edge_type_subgraph == 0)[0]) == num_edges_From_context_node
+            # assert len(np.where(edge_type_subgraph == 19)[0]) == num_edges_to_context_node
             edge_type[subgraph] = torch.LongTensor(edge_type_subgraph).cuda()
+        for subgraph in range(len(edge_type)):
+            edge_type[subgraph] = edge_type[subgraph].cuda()
+            edge_index[subgraph] = edge_index[subgraph].cuda()
         return edge_type,edge_index
 
 
@@ -303,9 +517,8 @@ class LM_QAGNN(nn.Module):
 
         og_edge_index = edge_index
         og_edge_type = edge_type
-
         # if os.path.isfile(f"bottom_k/{q_ids[0]}.npy"):
-        #     edge_type,edge_index = self.mask_subgraphs(q_ids,edge_type,edge_index)
+        edge_type,edge_index = self.mask_subgraphs(q_ids,edge_type,edge_index)
 
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
         adj = (edge_index.to(node_type_ids.device), edge_type.to(node_type_ids.device)) #edge_index: [2, total_E]   edge_type: [total_E, ]
