@@ -1,5 +1,12 @@
 *.pyc
 
 .ipynb_checkpoints
+bottom_k/*
+top_k/*
+our_dataset/*
+data_old/*
+data/*
+logs/*
+cqsa/*
 
 saved*
