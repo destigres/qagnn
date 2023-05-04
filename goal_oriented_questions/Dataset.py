@@ -8,10 +8,13 @@ import pickle
 class GoalOrientedQuestionDataset(Dataset):
     def __init__(self,edges_file,q_id_file,qa_map_file):
         self.f = h5py.File(edges_file,'r')
+        print(self.f.keys())
         with open(qa_map_file, 'rb') as file:
             question_dict = pickle.load(file)
         file.close()
         self.q_ids = np.load(q_id_file,allow_pickle=True)
+        if len(self.q_ids.shape) > 1:
+            self.q_ids = self.q_ids.flatten()
         self.q_dict = question_dict
 
         assert len(self.q_ids) == len(self.f["ground_truth_adj"]), "Number of questions between edges dataset file and question_ids file does not match"
@@ -26,11 +29,16 @@ class GoalOrientedQuestionDataset(Dataset):
         least_damaging_edges = torch.LongTensor(self.f["least_damaging_edges"][idx])
         most_damaging_edge_types =  torch.LongTensor(self.f["most_damaging_edge_types"][idx])
         least_damaging_edge_types = torch.LongTensor(self.f["least_damaging_edge_types"][idx])
+        og_node_embeds = torch.FloatTensor(self.f["og_node_embeds"][idx])
+        concept_ids = torch.LongTensor(self.f["concept_ids"][idx])
+
         q_id = self.q_ids[idx]
 
         sample = {'og_graphs': og_sub_graphs, 'node_embeds_after_mp': node_emebds_after_message_pass, 'most_damage_edges': most_damaging_edges,
-                  'most_damage_edges': least_damaging_edges, 'most_damage_edge_types': most_damaging_edge_types, 'least_damage_edge_types': least_damaging_edge_types,
-                  'q_id': q_id, 'question': self.q_dict[q_id]["question"], 'answer': self.q_dict[q_id]["answerKey"], 'choices': self.q_dict[q_id]["choices"]
+                  'least_damage_edges': least_damaging_edges, 'most_damage_edges': least_damaging_edges, 'most_damage_edge_types': most_damaging_edge_types, 'least_damage_edge_types': least_damaging_edge_types,
+                  'q_id': q_id, 'question': self.q_dict[q_id]["question"], 'answer': self.q_dict[q_id]["answerKey"], 'choices': self.q_dict[q_id]["choices"],
+                  'node_embeds': og_node_embeds,
+                  'concept_ids': concept_ids
                   }
         return sample
 
