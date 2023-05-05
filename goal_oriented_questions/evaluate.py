@@ -7,10 +7,9 @@ try:
     from transformers import (ConstantLRSchedule, WarmupLinearSchedule, WarmupConstantSchedule)
 except:
     from transformers import get_constant_schedule, get_constant_schedule_with_warmup,  get_linear_schedule_with_warmup
-
+from torchmetrics.classification import F1Score
 from modeling.modeling_qagnn import *
 from utils.parser_utils import *
-
 DECODER_DEFAULT_LR = {
     'csqa': 1e-3,
     'obqa': 3e-4,
@@ -153,31 +152,37 @@ def evaluate_secondary_task(pred_edges,criterion,data,type):
 
 
 def make_tensors(context_node_embed,node_embeds,edges,kind='imp'):
-    Y = torch.ones((len(edges)))
-    if kind == 'non_imp':
-        Y = torch.neg((Y))
+    if kind == 'imp':
+        Y = torch.ones((len(edges)))
+    else:
+        Y = torch.zeros((len(edges)))
     context_node_copied = context_node_embed.unsqueeze(1).repeat(1, edges.shape[0]).T
     edges_node_emebds = node_embeds[edges.flatten()].reshape(edges.shape[0] , 200*2)
     X = torch.cat((edges_node_emebds, context_node_copied), dim=-1)
     return X,Y
 
+f1 = F1Score(task="binary",threshold=0.5)
 def evaluate_primary_task(model,criterion,data,device):
     model.eval()
     losses = []
-    outputs = []
+    f1s = []
     with torch.no_grad():
         for batch in tqdm(data):
             important_edges, non_important_edges = batch['most_damage_edges'], batch['least_damage_edges']
             context_nodes = batch["node_embeds"][:, :, 0, :]
-            pad_idxs = torch.zeros(5, 5)
+            pad_idxs = torch.zeros(important_edges.shape[0], 5)
             for q in range(important_edges.shape[0]):
                 a_edge_outputs = []
+                labels = []
                 for a in range(important_edges.shape[1]):
                     first_pad_idx = np.where((important_edges.numpy()[q, a] == (-1, -1)).all(axis=-1) == True)[0][0]
                     pad_idxs[q, a] = first_pad_idx
                     # do forward pass here
                     imp_edges = important_edges[q, a, :first_pad_idx, :]
                     no_imp_edges = non_important_edges[q, a, :first_pad_idx, :]
+
+                    if len(imp_edges) == 0:
+                        continue
 
                     inputs_imp, labels_imp = make_tensors(context_nodes[q, a], batch["node_embeds"][q, a], imp_edges,'imp')
                     inputs_non_imp, labels_non_imp = make_tensors(context_nodes[q, a], batch["node_embeds"][q, a], no_imp_edges,'non_imp')
@@ -194,8 +199,15 @@ def evaluate_primary_task(model,criterion,data,device):
                     output_non_imp = model(inputs_non_imp)
                     loss += criterion(output_non_imp.flatten(), labels_non_imp)
 
+                    a_edge_outputs.append(torch.sigmoid(output_imp.flatten().cpu()))
+                    a_edge_outputs.append(torch.sigmoid(output_non_imp.flatten().cpu()))
+                    labels.append(torch.ones(output_non_imp.shape[0]))
+                    labels.append(torch.zeros((output_non_imp.shape[0])))
+
                     losses.append(loss.item())
-                    a_edge_outputs.append(output)
-                x = 1
-        return np.mean(loss)
+
+                if len(a_edge_outputs) > 0:
+                    f = f1(torch.cat(a_edge_outputs),torch.cat(labels).int())
+                    f1s.append(f.item())
+        return np.mean(losses),np.mean(f1s),important_edges
 

@@ -30,6 +30,7 @@ class GoalOrientedQuestionDataset(Dataset):
         most_damaging_edge_types =  torch.LongTensor(self.f["most_damaging_edge_types"][idx])
         least_damaging_edge_types = torch.LongTensor(self.f["least_damaging_edge_types"][idx])
         og_node_embeds = torch.FloatTensor(self.f["og_node_embeds"][idx])
+        node_embeds = torch.FloatTensor(self.f["node_embeds"][idx])
         concept_ids = torch.LongTensor(self.f["concept_ids"][idx])
 
         q_id = self.q_ids[idx]
@@ -37,7 +38,8 @@ class GoalOrientedQuestionDataset(Dataset):
         sample = {'og_graphs': og_sub_graphs, 'node_embeds_after_mp': node_emebds_after_message_pass, 'most_damage_edges': most_damaging_edges,
                   'least_damage_edges': least_damaging_edges, 'most_damage_edges': least_damaging_edges, 'most_damage_edge_types': most_damaging_edge_types, 'least_damage_edge_types': least_damaging_edge_types,
                   'q_id': q_id, 'question': self.q_dict[q_id]["question"], 'answer': self.q_dict[q_id]["answerKey"], 'choices': self.q_dict[q_id]["choices"],
-                  'node_embeds': og_node_embeds,
+                  'og_node_embeds': og_node_embeds,
+                  'node_embeds': node_embeds,
                   'concept_ids': concept_ids
                   }
         return sample
