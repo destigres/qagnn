@@ -1,6 +1,7 @@
 from modeling.modeling_encoder import TextEncoder, MODEL_NAME_TO_CLASS
 from utils.data_utils import *
 from utils.layers import *
+import numpy as np
 import torch.nn.functional as F
 
 
@@ -155,6 +156,8 @@ class QAGNN(nn.Module):
         gnn_input1 = gnn_input1.to(node_type_ids.device)
         gnn_input = self.dropout_e(torch.cat([gnn_input0, gnn_input1], dim=1)) #(batch_size, n_node, dim_node)
 
+        if not os.path.isdir('batch_attentions'):
+            os.mkdir('batch_attentions')
 
         #Normalize node sore (use norm from Z)
         _mask = (torch.arange(node_scores.size(1), device=node_scores.device) < adj_lengths.unsqueeze(1)).float() #0 means masked out #[batch_size, n_node]
@@ -165,7 +168,6 @@ class QAGNN(nn.Module):
         mean_norm  = (torch.abs(node_scores)).sum(dim=1) / adj_lengths  #[batch_size, ]
         node_scores = node_scores / (mean_norm.unsqueeze(1) + 1e-05) #[batch_size, n_node]
         node_scores = node_scores.unsqueeze(2) #[batch_size, n_node, 1]
-
 
         gnn_output = self.gnn(gnn_input, adj, node_type_ids, node_scores)
 
@@ -202,6 +204,11 @@ class LM_QAGNN(nn.Module):
                                         fc_dim, n_fc_layer, p_emb, p_gnn, p_fc,
                                         pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb,
                                         init_range=init_range)
+        self.mask_edges = False
+        self.batch_number = -1
+
+    def reset_batch_number(self):
+        self.batch_number = -1
 
 
     def forward(self, *inputs, layer_id=-1, cache_output=False, detail=False):
@@ -224,7 +231,35 @@ class LM_QAGNN(nn.Module):
         _inputs = [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:-6]] + [x.view(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[-6:-2]] + [sum(x,[]) for x in inputs[-2:]]
 
         *lm_inputs, concept_ids, node_type_ids, node_scores, adj_lengths, edge_index, edge_type = _inputs
+        self.batch_number += 1
+        edge_lengths = [arr.size(1) for arr in edge_index]
+
         edge_index, edge_type = self.batch_graph(edge_index, edge_type, concept_ids.size(1))
+
+        if self.mask_edges:
+            attention_vals = np.load(os.path.join('batch_attentions', str(self.batch_number) + '.npy'))
+            attention_vals = np.mean(attention_vals, axis=1)
+            attention_vals = attention_vals[:edge_index.size(dim=1)]
+            curr_length = 0
+            edge_index_arr, edge_type_arr = [], []
+
+            for i, edge_length in enumerate(edge_lengths):
+                edge_index_sliced = edge_index[:, curr_length:curr_length + edge_length]
+                edge_type_sliced = edge_type[curr_length:curr_length + edge_length]
+                attention_vals_sliced = attention_vals[curr_length:curr_length + edge_length]
+                sorted_attention_vals = sorted(attention_vals_sliced.tolist())
+                thresh = sorted_attention_vals[int(0.1 * len(sorted_attention_vals))]
+                mask_attention = torch.tensor(attention_vals_sliced) >= thresh
+                edge_index_sliced = torch.masked_select(edge_index_sliced, mask_attention)
+                edge_index_sliced = torch.reshape(edge_index_sliced, (2, edge_index_sliced.size(0) // 2))
+                edge_index_arr.append(edge_index_sliced)
+                edge_type_sliced = torch.masked_select(edge_type_sliced.T, mask_attention)
+                edge_type_arr.append(edge_type_sliced)
+                curr_length += edge_length
+
+            edge_index = torch.cat(edge_index_arr, dim=1)
+            edge_type = torch.cat(edge_type_arr, dim=0)
+
         adj = (edge_index.to(node_type_ids.device), edge_type.to(node_type_ids.device)) #edge_index: [2, total_E]   edge_type: [total_E, ]
 
         sent_vecs, all_hidden_states = self.encoder(*lm_inputs, layer_id=layer_id)
@@ -403,10 +438,14 @@ class GATConvE(MessagePassing):
         self.linear_query = nn.Linear(2*emb_dim, head_count * self.dim_per_head)
 
         self._alpha = None
+        self.batch_number = -1
+        self.save = False
 
         #For final MLP
         self.mlp = torch.nn.Sequential(torch.nn.Linear(emb_dim, emb_dim), torch.nn.BatchNorm1d(emb_dim), torch.nn.ReLU(), torch.nn.Linear(emb_dim, emb_dim))
 
+    def reset_batch_number(self):
+        self.batch_number = -1
 
     def forward(self, x, edge_index, edge_type, node_type, node_feature_extra, return_attention_weights=False):
         # x: [N, emb_dim]
@@ -419,6 +458,8 @@ class GATConvE(MessagePassing):
         edge_vec = make_one_hot(edge_type, self.n_etype +1) #[E, 39]
         self_edge_vec = torch.zeros(x.size(0), self.n_etype +1).to(edge_vec.device)
         self_edge_vec[:,self.n_etype] = 1
+
+        self.batch_number += 1
 
         head_type = node_type[edge_index[0]] #[E,] #head=src
         tail_type = node_type[edge_index[1]] #[E,] #tail=tgt
@@ -443,6 +484,10 @@ class GATConvE(MessagePassing):
         out = self.mlp(aggr_out)
 
         alpha = self._alpha
+
+        if self.save:
+            np.save(os.path.join('batch_attentions', str(self.batch_number) + '.npy'), alpha.cpu())
+
         self._alpha = None
 
         if return_attention_weights:
@@ -461,7 +506,7 @@ class GATConvE(MessagePassing):
         assert x_i.size(1) == x_j.size(1) == 2*self.emb_dim
         assert x_i.size(0) == x_j.size(0) == edge_attr.size(0) == edge_index.size(1)
 
-        key   = self.linear_key(torch.cat([x_i, edge_attr], dim=1)).view(-1, self.head_count, self.dim_per_head) #[E, heads, _dim]
+        key = self.linear_key(torch.cat([x_i, edge_attr], dim=1)).view(-1, self.head_count, self.dim_per_head) #[E, heads, _dim]
         msg = self.linear_msg(torch.cat([x_j, edge_attr], dim=1)).view(-1, self.head_count, self.dim_per_head) #[E, heads, _dim]
         query = self.linear_query(x_j).view(-1, self.head_count, self.dim_per_head) #[E, heads, _dim]
 
