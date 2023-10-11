@@ -72,6 +72,7 @@ class GoalOrientedQuestionDataset(Dataset):
             _type_: _description_
         """
         # The edge index starts with 0
+
         edge_index = 0
         total_questions = len(self.f["ground_truth_adj"])
 
@@ -104,6 +105,7 @@ class GoalOrientedQuestionDataset(Dataset):
             
             self.train_edges[self.train_test_split] = count_valid_edges
         
+
         if train and train_samples_to_pick > -1:
             indices = set(random.sample(range(1, count_valid_edges + 1), k=train_samples_to_pick))
         else:
@@ -145,7 +147,25 @@ class GoalOrientedQuestionDataset(Dataset):
                             inputs = np.concatenate([edge, pooled_representation, one_hot_r], axis=0)
 
                             yield inputs, 0
-                
+    
+    def batch_itr(self, batch_size=32, train=True, train_samples_to_pick=-1):
+        generator = self.link_prediction_iterator(train, train_samples_to_pick)
+
+        # Empty batch to start with
+        batch_X = []
+        batch_y = []
+
+        for X, y in generator:
+            batch_X.append(X)
+            batch_y.append(y)
+
+            if len(batch_y) == batch_size:
+                yield np.array(batch_X), np.array(batch_y)
+            
+                batch_X = []
+                batch_y = []
+        
+        return
 
 if __name__ == '__main__':
     edges_file = '../our_dataset/version_1/csqa_dev.hdf5'
@@ -161,9 +181,3 @@ if __name__ == '__main__':
         total += 1
 
     print("Total", total)
-    
-    start = time.time()
-    for batch in dev_dataloader:
-        continue
-    end = time.time()
-    print("name of process", end - start)
