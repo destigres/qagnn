@@ -16,7 +16,7 @@ model = nn.Sequential(
     nn.Linear(500, 200),
     nn.ReLU(),
     nn.Linear(200, 1),
-    nn.Sigmoid()
+    nn.Sigmoid(),
 )
 
 # roc_auc_1 = AUC()  # You can define your own AUC function
@@ -24,12 +24,16 @@ model = nn.Sequential(
 # precision_1 = Precision()  # You can define your own Precision function
 # recall_1 = Recall()  # You can define your own Recall function
 
-checkpoint_path = "checkpoints_without_context_nodes_with_edge_types_corrected/cp-{epoch:04d}.ckpt"
+checkpoint_path = (
+    "checkpoints_without_context_nodes_with_edge_types_corrected/cp-{epoch:04d}.ckpt"
+)
 
-latest = None  # You will need to set this to the path of the latest checkpoint if available
+latest = (
+    None  # You will need to set this to the path of the latest checkpoint if available
+)
 
 if latest is not None:
-    initial_epoch = int(latest.split('/')[1][3:7])
+    initial_epoch = int(latest.split("/")[1][3:7])
 else:
     initial_epoch = 0
 
@@ -42,15 +46,19 @@ optimizer = optim.Adam(model.parameters())
 if latest is not None:
     model.load_state_dict(torch.load(latest))
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import dataloader
 
-    edges_file = '/local2/data/our_dataset/version_1/csqa_dev.hdf5'
-    q_id_file = '/local2/data/our_dataset/version_1/question_ids.npy'
-    qa_map_file = '/local2/data/our_dataset/version_1/id_qa_map.pkl'
-    emb_file = '/local2/data/our_dataset/version_1/tzw.ent.npy'
-    dev_ds = dataloader.GoalOrientedQuestionDataset(edges_file, q_id_file, qa_map_file, emb_file)
-    dev_dataloader = dataloader.DataLoader(dev_ds, batch_size=5, num_workers=8, pin_memory=True, shuffle=True)
+    edges_file = "/local2/data/our_dataset/version_1/csqa_dev.hdf5"
+    q_id_file = "/local2/data/our_dataset/version_1/question_ids.npy"
+    qa_map_file = "/local2/data/our_dataset/version_1/id_qa_map.pkl"
+    emb_file = "/local2/data/our_dataset/version_1/tzw.ent.npy"
+    dev_ds = dataloader.GoalOrientedQuestionDataset(
+        edges_file, q_id_file, qa_map_file, emb_file
+    )
+    dev_dataloader = dataloader.DataLoader(
+        dev_ds, batch_size=5, num_workers=8, pin_memory=True, shuffle=True
+    )
 
     total = 0
 
@@ -58,12 +66,17 @@ if __name__ == '__main__':
     gen_valid = dev_ds.batch_itr(batch_size=32, train=False)
     for epoch in range(10):
 
-        gen_train = dev_ds.batch_itr(batch_size=32, train=True, train_samples_to_pick=1000000)
-        
+        gen_train = dev_ds.batch_itr(
+            batch_size=32, train=True, train_samples_to_pick=1000000
+        )
+
         losses = []
         model.train()
         for i, data in enumerate(gen_train):
-            inputs, labels = data  # You will need to adjust this based on your data format
+            (
+                inputs,
+                labels,
+            ) = data  # You will need to adjust this based on your data format
             inputs, labels = torch.Tensor(inputs), torch.Tensor(labels)
             labels = labels.unsqueeze(1)
             optimizer.zero_grad()
@@ -73,13 +86,23 @@ if __name__ == '__main__':
             losses.append(loss.item())
 
             if i % 1000 == 0:
-                print("Epoch [" + str(epoch) +  "] Iteration [" + str(i) + "] " + str(np.mean(losses)))
+                print(
+                    "Epoch ["
+                    + str(epoch)
+                    + "] Iteration ["
+                    + str(i)
+                    + "] "
+                    + str(np.mean(losses))
+                )
                 losses = []
             optimizer.step()
 
         model.eval()
         for data in gen_valid:
-            inputs, labels = data  # You will need to adjust this based on your data format
+            (
+                inputs,
+                labels,
+            ) = data  # You will need to adjust this based on your data format
             inputs, labels = torch.Tensor(inputs), torch.Tensor(labels)
             # Calculate metrics here
 
