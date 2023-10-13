@@ -107,7 +107,7 @@ class GoalOrientedQuestionDataset(Dataset):
         
 
         if train and train_samples_to_pick > -1:
-            indices = set(random.sample(range(1, count_valid_edges + 1), k=train_samples_to_pick))
+            indices = set(random.sample(range(1, self.train_edges[self.train_test_split] + 1), k=train_samples_to_pick))
         else:
             indices = None
 
@@ -149,8 +149,9 @@ class GoalOrientedQuestionDataset(Dataset):
                             yield inputs, 0
     
     def batch_itr(self, batch_size=32, train=True, train_samples_to_pick=-1):
+        
         generator = self.link_prediction_iterator(train, train_samples_to_pick)
-
+        
         # Empty batch to start with
         batch_X = []
         batch_y = []
