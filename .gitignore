@@ -3,3 +3,10 @@
 .ipynb_checkpoints
 
 saved*
+goal_oriented_questions/runs/*
+goal_oriented_questions/checkpoints*
+logs/*
+data/*
+.vscode/*
+data_old/*
+data_preprocessed_release.zip

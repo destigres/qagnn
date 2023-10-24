@@ -1,7 +1,13 @@
+"""Custom version of modeling_qagnn.py for extracting subgraphs and other functions related to task oriented asking"""
+
+
+import numpy as np
+
 from modeling.modeling_encoder import TextEncoder, MODEL_NAME_TO_CLASS
 from utils.data_utils import *
 from utils.layers import *
 import torch.nn.functional as F
+import torch
 
 
 class QAGNN_Message_Passing(nn.Module):
@@ -60,12 +66,12 @@ class QAGNN_Message_Passing(nn.Module):
 
     def mp_helper(self, _X, edge_index, edge_type, _node_type, _node_feature_extra):
         for _ in range(self.k):
-            _X = self.gnn_layers[_](
+            _X, att = self.gnn_layers[_](
                 _X, edge_index, edge_type, _node_type, _node_feature_extra
             )
             _X = self.activation(_X)
             _X = F.dropout(_X, self.dropout_rate, training=self.training)
-        return _X
+        return _X, att
 
     def forward(self, H, A, node_type, node_score, cache_output=False):
         """
@@ -215,6 +221,117 @@ class QAGNN(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+    def get_top_bottom_k(
+        self, attn_subgraphs, og_edge_idx, og_edge_type, bs, top_x_percent, top=True
+    ):
+        """
+        top_x_percent: percent of EACH ANSWERS SUBGRAPH to mask
+        top: if True, mask the top x percent, if False, mask the bottom x percent
+        """
+        assert top_x_percent < 1.0
+        assert top_x_percent > 0.0
+        num_subgraphs = len(attn_subgraphs) // bs
+        top_k_subgraphs = []
+        for a in range(bs):
+            this_subgraph = []
+            for b in range(num_subgraphs):
+                i = a * num_subgraphs + b
+                # select the top 2% of attentions for ecah of the 5 subgraphs
+                top_x = int(len(torch.mean(attn_subgraphs[i], -1)) * top_x_percent)
+                valid_edge_types = (
+                    torch.where((og_edge_type[i] > 1) & (og_edge_type[i] <= 19))[0]
+                    .cpu()
+                    .numpy()
+                )
+                edges_sorted_by_attn = (
+                    torch.argsort(
+                        torch.mean(attn_subgraphs[i], dim=-1),
+                        dim=-1,
+                        descending=top,  # descend if we want top, ascend if we want bottom
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                edge_masks = np.isin(edges_sorted_by_attn, valid_edge_types)
+                avail_edges = edges_sorted_by_attn[edge_masks]
+                indices = avail_edges[:top_x]
+                # if indices.is_cuda:
+                #     indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10,largest=True).indices.cpu().detach().numpy()
+                # else:
+                #     indices = torch.topk(torch.mean(attn_subgraphs[i], -1), top_10, largest=True).indices.numpy()
+
+                # this_subgraph.append(indices)
+                # htr = torch.cat(
+                #     [og_edge_idx[i][:, indices], og_edge_type[i][indices].unsqueeze(0)]
+                # )
+                htr = [
+                    (
+                        og_edge_idx[i][0][idx].item(),
+                        og_edge_idx[i][1][idx].item(),
+                        og_edge_type[i][idx].item(),
+                    )
+                    for idx in indices
+                ]
+                this_subgraph += htr
+            top_k_subgraphs.append(this_subgraph)
+        return top_k_subgraphs
+
+    def break_attn_values_into_subgraphs(self, attn, og_edge_type, og_edge_index):
+        num_subgraphs = len(og_edge_index)
+        attn_subgraphs = []
+        prev_num_edges = 0
+        for i in range(num_subgraphs):
+            num_edges_in_subgraph = og_edge_index[i].shape[-1]
+            attn_subgraphs.append(
+                attn[-1][prev_num_edges : prev_num_edges + num_edges_in_subgraph]
+            )
+            prev_num_edges = num_edges_in_subgraph
+        return attn_subgraphs
+
+    def get_random_k(self, attn_subgraphs, og_edge_idx, og_edge_type):
+        num_subgraphs = len(attn_subgraphs)
+        top_k_subgraphs = []
+        for i in range(num_subgraphs):
+            num_choices = len(torch.mean(attn_subgraphs[i], -1))
+            random_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * 0.10)
+            random_indices = np.random.randint(low=0, high=num_choices, size=random_10)
+            top_k_subgraphs.append(random_indices)
+        return top_k_subgraphs
+
+    def get_bottom_k(self, attn_subgraphs, og_edge_idx, og_edge_type):
+        num_subgraphs = len(attn_subgraphs)
+        top_k_subgraphs = []
+        for i in range(num_subgraphs):
+            bottom_10 = int(len(torch.mean(attn_subgraphs[i], -1)) * 0.10)
+            valid_edge_types = (
+                torch.where((og_edge_type[i] > 1) & (og_edge_type[i] <= 19))[0]
+                .cpu()
+                .numpy()
+            )
+            edges_sorted_by_attn = (
+                torch.argsort(
+                    torch.mean(attn_subgraphs[i], dim=-1), dim=-1, descending=False
+                )
+                .cpu()
+                .numpy()
+            )
+            edge_masks = np.isin(edges_sorted_by_attn, valid_edge_types)
+            avail_edges = edges_sorted_by_attn[edge_masks]
+            indices = avail_edges[:bottom_10]
+            # if indices.is_cuda:
+            #     indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10,largest=False).indices.cpu().detach().numpy()
+            # else:
+            #     indices = torch.topk(torch.mean(attn_subgraphs[i], -1), bottom_10, largest=False).indices.numpy()
+            top_k_subgraphs.append(indices)
+        return top_k_subgraphs
+
+    def save_numpy_files(self, top_k, bottom_k, q_ids):
+        q_id = q_ids[0]
+        top_k_np = np.array(top_k, dtype=object)
+        bottom_k_np = np.array(bottom_k, dtype=object)
+        np.save(f"./bottom_k/{q_id}.npy", bottom_k_np)
+        np.save(f"./top_k/{q_id}.npy", top_k_np)
+
     def forward(
         self,
         sent_vecs,
@@ -223,8 +340,14 @@ class QAGNN(nn.Module):
         node_scores,
         adj_lengths,
         adj,
+        og_edge_index,
+        og_edge_type,
+        q_ids,
+        top_x_percent=None,
         emb_data=None,
         cache_output=False,
+        return_top_bottom_edges=False,
+        bs=None,
     ):
         """
         sent_vecs: (batch_size, dim_sent)
@@ -263,7 +386,40 @@ class QAGNN(nn.Module):
         )  # [batch_size, n_node]
         node_scores = node_scores.unsqueeze(2)  # [batch_size, n_node, 1]
 
-        gnn_output = self.gnn(gnn_input, adj, node_type_ids, node_scores)
+        gnn_output, attn = self.gnn(gnn_input, adj, node_type_ids, node_scores)
+
+        #### this section is for dataset construction #####
+
+        #################################################
+        ##### will GET the edges that we should mask ####### # chris
+        #################################################
+        if return_top_bottom_edges:
+            assert bs is not None  # must have batch size if doing masking
+            attn_subgraphs = self.break_attn_values_into_subgraphs(
+                attn, og_edge_type, og_edge_index
+            )
+            top_k = self.get_top_bottom_k(
+                attn_subgraphs, og_edge_index, og_edge_type, bs, top_x_percent, top=True
+            )
+            # bottom_k = self.get_bottom_k(attn_subgraphs, og_edge_index, og_edge_type, bs)
+            bottom_k = self.get_top_bottom_k(
+                attn_subgraphs,
+                og_edge_index,
+                og_edge_type,
+                bs,
+                top_x_percent,
+                top=False,
+            )
+            # random_k = self.get_random_k(attn_subgraphs, og_edge_index, og_edge_type)
+
+            return top_k, bottom_k
+        # np.save(f"./random_k/{q_id}.npy", bottom_k_np)
+        # np.save(f"./top_k/{q_id}.npy", top_k_np)
+
+        ####################################################
+        ##### save the edges that we should mask ###########
+        #################################################
+        # self.save_numpy_files(top_k,bottom_k,q_ids)
 
         Z_vecs = gnn_output[:, 0]  # (batch_size, dim_node)
 
@@ -333,8 +489,34 @@ class LM_QAGNN(nn.Module):
             init_range=init_range,
         )
 
-    def forward(self, *inputs, layer_id=-1, cache_output=False, detail=False):
+    # we do this to evaluation the masking technique we utilized for dataset creation
+    def mask_subgraphs(self, q_ids, edge_type, edge_index):
+        top_k_ = np.load(f"./random_k/{q_ids[0]}.npy", allow_pickle=True)
+        for subgraph in range(len(edge_type)):
+            idxs = top_k_[subgraph].flatten()
+            edge_index_subgraph = edge_index[subgraph].to("cpu").numpy()
+            edge_index_subgraph = np.delete(edge_index_subgraph, idxs, axis=-1)
+            edge_index[subgraph] = torch.LongTensor(edge_index_subgraph).cuda()
+            edge_type_subgraph = edge_type[subgraph].to("cpu").numpy()
+            edge_type_subgraph = np.delete(edge_type_subgraph, idxs, axis=-1)
+            edge_type[subgraph] = torch.LongTensor(edge_type_subgraph).cuda()
+        return edge_type, edge_index
+
+    def forward(
+        self,
+        *inputs,
+        q_ids=None,
+        top_x_percent=None,
+        edge_index=None,
+        edge_type=None,
+        layer_id=-1,
+        cache_output=False,
+        detail=False,
+        return_top_bottom_edges=False,
+    ):
+        # def forward(self, *inputs, layer_id=-1, cache_output=False, detail=False):
         """
+        dims:
         sent_vecs: (batch_size, num_choice, d_sent)    -> (batch_size * num_choice, d_sent)
         concept_ids: (batch_size, num_choice, n_node)  -> (batch_size * num_choice, n_node)
         node_type_ids: (batch_size, num_choice, n_node) -> (batch_size * num_choice, n_node)
@@ -365,6 +547,20 @@ class LM_QAGNN(nn.Module):
             edge_index,
             edge_type,
         ) = _inputs
+
+        og_edge_index = edge_index
+        og_edge_type = edge_type
+
+        ###############################################
+        # Perform masking based on the .npy files -
+        # swap out random_k with top_k vs bottom_K to perform diff experiments on masking technique. ##########
+        ###############################################
+        # if os.path.isfile(f"./random_k/{q_ids[0]}.npy"):
+        #     edge_type,edge_index = self.mask_subgraphs(q_ids,edge_type,edge_index)
+
+        # todo: write converse of mask_subgraphs to add in edges based om whether the link is deemed important /
+        # good question
+
         edge_index, edge_type = self.batch_graph(
             edge_index, edge_type, concept_ids.size(1)
         )
@@ -374,6 +570,27 @@ class LM_QAGNN(nn.Module):
         )  # edge_index: [2, total_E]   edge_type: [total_E, ]
 
         sent_vecs, all_hidden_states = self.encoder(*lm_inputs, layer_id=layer_id)
+        ##### if we are building the masked examples, return edges instead of following through with the model #####
+        if return_top_bottom_edges:
+            top_edges, bottom_edges = self.decoder(
+                sent_vecs.to(node_type_ids.device),
+                concept_ids,
+                node_type_ids,
+                node_scores,
+                adj_lengths,
+                adj,
+                og_edge_index,
+                og_edge_type,
+                q_ids,
+                emb_data=None,
+                cache_output=cache_output,
+                return_top_bottom_edges=return_top_bottom_edges,
+                top_x_percent=top_x_percent,
+                bs=bs,
+            )
+            return top_edges, bottom_edges
+
+        ##### #####
         logits, attn = self.decoder(
             sent_vecs.to(node_type_ids.device),
             concept_ids,
@@ -381,6 +598,9 @@ class LM_QAGNN(nn.Module):
             node_scores,
             adj_lengths,
             adj,
+            og_edge_index,
+            og_edge_type,
+            q_ids,
             emb_data=None,
             cache_output=cache_output,
         )
@@ -398,102 +618,6 @@ class LM_QAGNN(nn.Module):
             )
             # edge_index_orig: list of (batch_size, num_choice). each entry is torch.tensor(2, E)
             # edge_type_orig: list of (batch_size, num_choice). each entry is torch.tensor(E, )
-
-    def custom_forward(
-        self,
-        sent_vecs,
-        concept_ids,
-        node_type_ids,
-        node_scores,
-        adj_lengths,
-        adj,
-        og_edge_index,
-        og_edge_type,
-        q_ids,
-        emb_data=None,
-        cache_output=False,
-    ):
-        """
-        sent_vecs: (batch_size, dim_sent)
-        concept_ids: (batch_size, n_node)
-        adj: edge_index, edge_type
-        adj_lengths: (batch_size,)
-        node_type_ids: (batch_size, n_node)
-            0 == question entity; 1 == answer choice entity; 2 == other node; 3 == context node
-        node_scores: (batch_size, n_node, 1)
-
-        returns: (batch_size, 1)
-        """
-        gnn_input0 = self.activation(self.svec2nvec(sent_vecs)).unsqueeze(
-            1
-        )  # (batch_size, 1, dim_node)
-        gnn_input1 = self.concept_emb(
-            concept_ids[:, 1:] - 1, emb_data
-        )  # (batch_size, n_node-1, dim_node)
-        gnn_input1 = gnn_input1.to(node_type_ids.device)
-        gnn_input = self.dropout_e(
-            torch.cat([gnn_input0, gnn_input1], dim=1)
-        )  # (batch_size, n_node, dim_node)
-
-        # Normalize node sore (use norm from Z)
-        _mask = (
-            torch.arange(node_scores.size(1), device=node_scores.device)
-            < adj_lengths.unsqueeze(1)
-        ).float()  # 0 means masked out #[batch_size, n_node]
-        node_scores = -node_scores
-        node_scores = node_scores - node_scores[:, 0:1, :]  # [batch_size, n_node, 1]
-        node_scores = node_scores.squeeze(2)  # [batch_size, n_node]
-        node_scores = node_scores * _mask
-        mean_norm = (torch.abs(node_scores)).sum(dim=1) / adj_lengths  # [batch_size, ]
-        node_scores = node_scores / (
-            mean_norm.unsqueeze(1) + 1e-05
-        )  # [batch_size, n_node]
-        node_scores = node_scores.unsqueeze(2)  # [batch_size, n_node, 1]
-
-        #################################################
-        ##### will GET the edges that we should mask #######
-        #################################################
-        gnn_output, attn = self.gnn(gnn_input, adj, node_type_ids, node_scores)
-        attn_subgraphs = self.break_attn_values_into_subgraphs(
-            attn, og_edge_type, og_edge_index
-        )
-        top_k = self.get_top_k(attn_subgraphs, og_edge_index, og_edge_type)
-        bottom_k = self.get_bottom_k(attn_subgraphs, og_edge_index, og_edge_type)
-        # random_k = self.get_random_k(attn_subgraphs,og_edge_index,og_edge_type)
-
-        q_id = q_ids[0]
-        top_k_np = np.array(top_k, dtype=object)
-        # bottom_k_np = np.array(random_k,dtype=object)
-        bottom_k_np = np.array(bottom_k, dtype=object)
-        # np.save(f"./random_k/{q_id}.npy",bottom_k_np)
-        # np.save(f"./top_k/{q_id}.npy",top_k_np)
-        return top_k_np, bottom_k_np
-
-        ####################################################
-        ##### save the edges that we should mask ###########
-        #################################################
-        Z_vecs = gnn_output[:, 0]  # (batch_size, dim_node)
-
-        mask = torch.arange(
-            node_type_ids.size(1), device=node_type_ids.device
-        ) >= adj_lengths.unsqueeze(
-            1
-        )  # 1 means masked out
-
-        mask = mask | (node_type_ids == 3)  # pool over all KG nodes
-        mask[mask.all(1), 0] = 0  # a temporary solution to avoid zero node
-
-        sent_vecs_for_pooler = sent_vecs
-        graph_vecs, pool_attn = self.pooler(sent_vecs_for_pooler, gnn_output, mask)
-
-        if cache_output:
-            self.concept_ids = concept_ids
-            self.adj = adj
-            self.pool_attn = pool_attn
-
-        concat = self.dropout_fc(torch.cat((graph_vecs, sent_vecs, Z_vecs), 1))
-        logits = self.fc(concat)
-        return logits, pool_attn
 
     def batch_graph(self, edge_index_init, edge_type_init, n_nodes):
         # edge_index_init: list of (n_examples, ). each entry is torch.tensor(2, E)
@@ -806,7 +930,7 @@ class GATConvE(MessagePassing):
         edge_type,
         node_type,
         node_feature_extra,
-        return_attention_weights=False,
+        return_attention_weights=True,
     ):
         # x: [N, emb_dim]
         # edge_index: [2, E]
@@ -833,11 +957,11 @@ class GATConvE(MessagePassing):
             torch.cat([edge_vec, headtail_vec], dim=1)
         )  # [E+N, emb_dim]
 
-        # Add self loops to edge_index
+        # Add self loops to edge_index - why???
         loop_index = torch.arange(
             0, x.size(0), dtype=torch.long, device=edge_index.device
         )
-        loop_index = loop_index.unsqueeze(0).repeat(2, 1)
+        loop_index = loop_index.unsqueeze(0).repeat(2, 1)  # [2,1000]
         edge_index = torch.cat([edge_index, loop_index], dim=1)  # [2, E+N]
 
         x = torch.cat([x, node_feature_extra], dim=1)
