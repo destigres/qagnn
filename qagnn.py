@@ -1,5 +1,14 @@
 import random
 
+# from modeling.modeling_qagnn import *
+from modeling.modeling_qagnn_custom import *
+from utils.optimization_utils import OPTIMIZER_CLASSES
+from utils.parser_utils import *
+from collections import defaultdict, OrderedDict
+import numpy as np
+
+import socket, os, subprocess, datetime
+
 try:
     from transformers import (
         ConstantLRSchedule,
@@ -13,11 +22,6 @@ except:
         get_linear_schedule_with_warmup,
     )
 
-# from modeling.modeling_qagnn import *
-from modeling.modeling_qagnn_custom import *
-from utils.optimization_utils import OPTIMIZER_CLASSES
-from utils.parser_utils import *
-
 
 DECODER_DEFAULT_LR = {
     "csqa": 1e-3,
@@ -25,10 +29,6 @@ DECODER_DEFAULT_LR = {
     "medqa_usmle": 1e-3,
 }
 
-from collections import defaultdict, OrderedDict
-import numpy as np
-
-import socket, os, subprocess, datetime
 
 print(socket.gethostname())
 print("pid:", os.getpid())
@@ -53,11 +53,16 @@ def evaluate_accuracy(eval_set, model):
 
 
 def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
-    assert mode in ["incomplete"]
+    assert mode in ["incomplete", "missing_bottom", "missing_top"]
     n_samples, n_correct = 0, 0
     model.eval()
     with torch.no_grad():
+        # list of dicts each containing an example
+        # progressively build up then write to disk
+        pt_dataset_builder = [] 
+
         for q_ids, labels, *input_data in tqdm(eval_set):
+            pt_example = {} # primary task example to save in pt_dataset_builder
             # perform masking
             edge_index = input_data[-2]
             edge_type = input_data[-1]
@@ -70,6 +75,13 @@ def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
                     edge_type=edge_type,
                     return_top_bottom_edges=True,
                 )
+                # if in missing_bottom mode, ignore the top
+                # if in missing_top mode, ignore the bottom
+                if mode == "missing_top":
+                    bottom_k = []
+                elif mode == "missing_bottom":
+                    top_k = []
+
                 # drop top/bottom edges from each graph in the batch
                 new_edge_index = []
                 new_edge_type = []
@@ -80,13 +92,15 @@ def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
                     for answer_idx in range(len(edge_index[batch_idx])):  # each answer
                         edge_index_i = edge_index[batch_idx][answer_idx]
                         edge_type_i = edge_type[batch_idx][answer_idx]
-                        htr = torch.stack([edge_index_i[0], edge_index_i[1], edge_type_i])
+                        htr = torch.stack(
+                            [edge_index_i[0], edge_index_i[1], edge_type_i]
+                        )
                         # very slow
                         idx_to_keep = torch.tensor(
                             [
                                 x
                                 for x in range(edge_index_i.size(1))
-                                if tuple(htr[:,x].tolist()) not in set_to_drop
+                                if tuple(htr[:, x].tolist()) not in set_to_drop
                             ]
                         ).cuda()
 
@@ -95,12 +109,12 @@ def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
                         pass
                     new_edge_index.append(batch_edge_index)
                     new_edge_type.append(batch_edge_type)
-                
-                # replace the old edge_index and edge_type with the new ones
-                new_input_data = input_data
-                new_input_data[-2] = new_edge_index
-                new_input_data[-1] = new_edge_type
 
+                # replace the old edge_index and edge_type with the new ones
+                input_data[-2] = new_edge_index
+                input_data[-1] = new_edge_type
+
+            new_input_data = input_data
             logits, _ = model(*new_input_data)
             n_correct += (logits.argmax(1) == labels).sum().item()
             n_samples += labels.size(0)
@@ -758,7 +772,13 @@ def eval_detail_custom(args, eval_mode, top_x_percent):
     """
     custom val function for testing TOA questions. Same as eval_detail but takes a dataset with masked/answered edges.
     """
-    assert eval_mode in ["complete", "incomplete", "answered"]
+    assert eval_mode in [
+        "complete",
+        "incomplete",
+        "answered",
+        "missing_bottom",
+        "missing_top",
+    ]
     assert args.load_model_path is not None
     model_path = args.load_model_path
 
@@ -851,6 +871,14 @@ def eval_detail_custom(args, eval_mode, top_x_percent):
     elif eval_mode == "incomplete":
         dev_acc = evaluate_accuracy_custom(
             dataset.dev(), model, mode="incomplete", top_x_percent=top_x_percent
+        )
+    elif eval_mode == "missing_bottom":
+        dev_acc = evaluate_accuracy_custom(
+            dataset.dev(), model, mode="missing_bottom", top_x_percent=top_x_percent
+        )
+    elif eval_mode == "missing_top":
+        dev_acc = evaluate_accuracy_custom(
+            dataset.dev(), model, mode="missing_top", top_x_percent=top_x_percent
         )
     print("dev_acc {:7.4f}".format(dev_acc))
     if not save_test_preds:

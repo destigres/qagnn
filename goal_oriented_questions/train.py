@@ -8,9 +8,12 @@ import click
 import dataloader
 import os
 from pathlib import PurePath
-from models.feedforward_model import *
 import datetime
 import argparse
+
+# import models
+from models.feedforward_model import *
+from models.generative_model import *
 
 # import qagnn parent folder
 import sys
@@ -34,6 +37,12 @@ from qagnn import eval_detail_custom as qagnn_eval_detail_custom
 @click.option(
     "--top_x_percent", default=0.04, help="percent of each answer subgraph to mask"
 )
+@click.option(
+    "--profile_eval",
+    is_flag=True,
+    default=False,
+    help="run evaluation on complete/incomplete/missing_top/missing_bottom subgraphs before training",
+)
 def main(
     edges_file,
     q_id_file,
@@ -47,6 +56,7 @@ def main(
     save_every_n_epochs,
     validate_every_n_epochs,
     top_x_percent,
+    profile_eval,
 ):
     ### initial incomplete and complete evaluation
     torch.manual_seed(42)
@@ -104,14 +114,25 @@ def main(
     ]
     qagnn_args, _ = qagnn_parser.parse_known_args(qagnn_inputs)
 
-    # qagnn_main(qagnn_args)
-    # evaluate on the complete dataset
-    qagnn_eval_detail_custom(
-        qagnn_args, eval_mode="incomplete", top_x_percent=top_x_percent
-    )
-    qagnn_eval_detail_custom(
-        qagnn_args, eval_mode="complete", top_x_percent=top_x_percent
-    )
+    if profile_eval:
+        # qagnn_main(qagnn_args)
+        # evaluate on the complete dataset
+        print("incomplete")
+        qagnn_eval_detail_custom(
+            qagnn_args, eval_mode="incomplete", top_x_percent=top_x_percent
+        )
+        print("missing_bottom")
+        qagnn_eval_detail_custom(
+            qagnn_args, eval_mode="missing_bottom", top_x_percent=top_x_percent
+        )
+        print("missing_top")
+        qagnn_eval_detail_custom(
+            qagnn_args, eval_mode="missing_top", top_x_percent=top_x_percent
+        )
+        print("complete")
+        qagnn_eval_detail_custom(
+            qagnn_args, eval_mode="complete", top_x_percent=top_x_percent
+        )
 
     ### model training
 
@@ -121,6 +142,8 @@ def main(
     if model_name == "feedforward":
         # todo: set params as defauls in the model file
         model = FeedForwardModel()
+    elif model_name == "generative":
+        model = GenerativeModel()
     else:
         raise NotImplementedError
 
