@@ -117,22 +117,22 @@ def main(
     if profile_eval:
         # qagnn_main(qagnn_args)
         # evaluate on the complete dataset
-        print("incomplete")
-        qagnn_eval_detail_custom(
-            qagnn_args, eval_mode="incomplete", top_x_percent=top_x_percent
-        )
         print("missing_bottom")
         qagnn_eval_detail_custom(
             qagnn_args, eval_mode="missing_bottom", top_x_percent=top_x_percent
         )
+        # print("incomplete")
+        # qagnn_eval_detail_custom(
+        #     qagnn_args, eval_mode="incomplete", top_x_percent=top_x_percent
+        # )
         print("missing_top")
         qagnn_eval_detail_custom(
             qagnn_args, eval_mode="missing_top", top_x_percent=top_x_percent
         )
-        print("complete")
-        qagnn_eval_detail_custom(
-            qagnn_args, eval_mode="complete", top_x_percent=top_x_percent
-        )
+        # print("complete")
+        # qagnn_eval_detail_custom(
+        #     qagnn_args, eval_mode="complete", top_x_percent=top_x_percent
+        # )
 
     ### model training
 

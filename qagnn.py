@@ -66,7 +66,10 @@ def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
             # perform masking
             edge_index = input_data[-2]
             edge_type = input_data[-1]
-            if mode == "incomplete":
+            batch_size = len(q_ids)
+            if mode in ["incomplete", "missing_top", "missing_bottom"]:
+                # top_k and bottom_k have one entry per batch item
+                # may contain duplicates coming from different answer subgraphs
                 top_k, bottom_k = model.forward(
                     *input_data,
                     q_ids=q_ids,
@@ -78,9 +81,9 @@ def evaluate_accuracy_custom(eval_set, model, mode, top_x_percent):
                 # if in missing_bottom mode, ignore the top
                 # if in missing_top mode, ignore the bottom
                 if mode == "missing_top":
-                    bottom_k = []
+                    bottom_k = [[]] * batch_size
                 elif mode == "missing_bottom":
-                    top_k = []
+                    top_k = [[]] * batch_size
 
                 # drop top/bottom edges from each graph in the batch
                 new_edge_index = []
